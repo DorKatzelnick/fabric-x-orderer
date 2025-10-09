@@ -129,6 +129,7 @@ type BatcherNodeConfig struct {
 	BatchSequenceGap                    types.BatchSequence
 	ClientSignatureVerificationRequired bool
 	MetricsLogInterval                  time.Duration
+	Bundle                              channelconfig.Resources
 }
 
 type ConsenterNodeConfig struct {
