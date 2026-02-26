@@ -281,11 +281,12 @@ func (b *Batcher) Submit(ctx context.Context, req *protos.Request) (*protos.Subm
 
 func (b *Batcher) SubmitStream(stream protos.RequestTransmit_SubmitStreamServer) error {
 	// TODO: certificate pinning (bathcer trust router form his own party.)
+	// b.logger.Infof("Client connected ##")
 	stop := make(chan struct{})
 	defer close(stop)
 
 	defer func() {
-		b.logger.Infof("Client disconnected")
+		// b.logger.Infof("Client disconnected")
 	}()
 
 	responses := make(chan *protos.SubmitResponse, 1000)

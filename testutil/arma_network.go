@@ -61,6 +61,16 @@ func (armaNetwork *ArmaNetwork) Stop() {
 	}
 }
 
+func (armaNetwork *ArmaNetwork) StopAllButRouter() {
+	for _, k := range []NodeType{Assembler, Consensus, Batcher} {
+		for i := range armaNetwork.armaNodes[k] {
+			for j := range armaNetwork.armaNodes[k][i] {
+				armaNetwork.armaNodes[k][i][j].StopArmaNode()
+			}
+		}
+	}
+}
+
 func (armaNetwork *ArmaNetwork) Kill() {
 	for _, k := range []NodeType{Assembler, Consensus, Batcher, Router} {
 		for i := range armaNetwork.armaNodes[k] {
@@ -73,6 +83,16 @@ func (armaNetwork *ArmaNetwork) Kill() {
 
 func (armaNetwork *ArmaNetwork) Restart(t *testing.T, readyChan chan string) {
 	for _, k := range []NodeType{Assembler, Consensus, Batcher, Router} {
+		for i := range armaNetwork.armaNodes[k] {
+			for j := range armaNetwork.armaNodes[k][i] {
+				armaNetwork.armaNodes[k][i][j].RestartArmaNode(t, readyChan)
+			}
+		}
+	}
+}
+
+func (armaNetwork *ArmaNetwork) RestartAllButRouter(t *testing.T, readyChan chan string) {
+	for _, k := range []NodeType{Assembler, Consensus, Batcher} {
 		for i := range armaNetwork.armaNodes[k] {
 			for j := range armaNetwork.armaNodes[k][i] {
 				armaNetwork.armaNodes[k][i][j].RestartArmaNode(t, readyChan)

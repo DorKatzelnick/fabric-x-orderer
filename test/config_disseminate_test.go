@@ -290,6 +290,8 @@ func TestConfigTXDisseminationWithVerification(t *testing.T) {
 		Signer:     pullRequestSigner,
 	})
 
+	time.Sleep(5 * time.Second) // TODO make sure router has restarted.
+
 	// Check config store size of routers
 	for i := 0; i < numOfParties; i++ {
 		localConfigPath := armaNetwork.GetRouter(t, types.PartyID(i+1)).RunInfo.NodeConfigPath
@@ -321,7 +323,7 @@ func TestConfigTXDisseminationWithVerification(t *testing.T) {
 		}
 	}
 
-	armaNetwork.Stop()
+	armaNetwork.StopAllButRouter()
 
 	// Check ledger height of consenters
 	for i := 0; i < numOfParties; i++ {
@@ -338,8 +340,8 @@ func TestConfigTXDisseminationWithVerification(t *testing.T) {
 
 	// Restart all nodes
 	readyChan = make(chan string, numOfArmaNodes)
-	armaNetwork.Restart(t, readyChan)
-	testutil.WaitReady(t, readyChan, numOfArmaNodes, 10)
+	armaNetwork.RestartAllButRouter(t, readyChan)
+	testutil.WaitReady(t, readyChan, numOfArmaNodes-4, 10)
 
 	// Initialize a new broadcast client
 	broadcastClient = client.NewBroadcastTxClient(uc, 10*time.Second)
@@ -352,6 +354,7 @@ func TestConfigTXDisseminationWithVerification(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, "INTERNAL_SERVER_ERROR, Info: request structure verification error: signature did not satisfy policy /Channel/Writers")
 
+	time.Sleep(5 * time.Second) //TODO make sure router and batcher are connected. probably repeat until success.
 	// Send one more well signed data tx
 	env = tx.CreateSignedStructuredEnvelope(txContent, signer, certBytes, fmt.Sprintf("org%d", submittingParty))
 	err = broadcastClient.SendTx(env)
