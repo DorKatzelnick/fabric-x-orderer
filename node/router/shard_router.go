@@ -218,6 +218,7 @@ func (sr *ShardRouter) reconnect(connIndex int) error {
 
 func (sr *ShardRouter) InitShardRouter() {
 	sr.initOnce.Do(func() {
+		sr.logger.Infof("Initializing shard-router with batcher endpoint %s", sr.batcherEndpoint)
 		sr.initConnPoolAndStreams()
 		sr.startReconnectionRoutine()
 	})
@@ -381,6 +382,7 @@ func (sr *ShardRouter) SoftStop(errToClients error) {
 	// close the reconnection goroutine
 	sr.closeReconnectOnce.Do(func() {
 		close(sr.closeReconnect)
+		sr.logger.Infof("Shard-router is stopping, closing the reconnection routine: %v", errToClients)
 	})
 
 	// send error responses to all pending requests in all streams

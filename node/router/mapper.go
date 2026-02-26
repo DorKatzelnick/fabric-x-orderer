@@ -13,6 +13,13 @@ import (
 	"github.com/hyperledger/fabric-lib-go/common/flogging"
 )
 
+func CreateMapperCRC64(logger *flogging.FabricLogger, shardCount uint16) *MapperCRC64 {
+	return &MapperCRC64{
+		Logger:     logger,
+		ShardCount: shardCount,
+	}
+}
+
 type ShardMapper interface {
 	Map(request []byte) (shard uint16, reqID []byte)
 }

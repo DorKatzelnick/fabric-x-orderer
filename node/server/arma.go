@@ -220,16 +220,15 @@ func launchRouter(stop chan struct{}) func(configFile *os.File) {
 		} else {
 			routerLogger = flogging.MustGetLogger(fmt.Sprintf("Router%d", routerConf.PartyID))
 		}
-		r := router.NewRouter(routerConf, routerLogger, signer, &policy.DefaultConfigUpdateProposer{}, &verify.DefaultOrdererRules{})
+		r := router.NewRouter(routerConf, conf, routerLogger, signer, &policy.DefaultConfigUpdateProposer{}, &verify.DefaultOrdererRules{})
 		ch := r.StartRouterService()
 
 		go func() {
 			<-ch
-			close(stop)
+			// close(stop)
+			routerLogger.Infof("Router service stop channel closed")
 		}()
 
-		// TODO: move StopSignalListen to Router.Run and pass stopChan
-		utils.StopSignalListen(nil, r, routerLogger, r.Address())
 		routerLogger.Infof("Router listening on %s, PartyID: %d", r.Address(), routerConf.PartyID)
 	}
 }

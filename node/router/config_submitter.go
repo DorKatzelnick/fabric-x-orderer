@@ -21,6 +21,7 @@ import (
 	"github.com/hyperledger/fabric-x-orderer/common/requestfilter"
 	"github.com/hyperledger/fabric-x-orderer/config/verify"
 	"github.com/hyperledger/fabric-x-orderer/node/comm"
+	nodeconfig "github.com/hyperledger/fabric-x-orderer/node/config"
 	protos "github.com/hyperledger/fabric-x-orderer/node/protos/comm"
 	"google.golang.org/grpc"
 )
@@ -48,15 +49,20 @@ type configSubmitter struct {
 	configRulesVerifier   verify.OrdererRules
 }
 
-func NewConfigSubmitter(consensusEndpoint string, consensusRootCAs [][]byte, tlsCert []byte, tlsKey []byte, logger *flogging.FabricLogger, bundle channelconfig.Resources, verifier *requestfilter.RulesVerifier, signer identity.SignerSerializer, configUpdateProposer policy.ConfigUpdateProposer, configRulesVerifier verify.OrdererRules) *configSubmitter {
+func NewConfigSubmitter(conf *nodeconfig.RouterNodeConfig, logger *flogging.FabricLogger, verifier *requestfilter.RulesVerifier, signer identity.SignerSerializer, configUpdateProposer policy.ConfigUpdateProposer, configRulesVerifier verify.OrdererRules) *configSubmitter {
+	var tlsCAsOfConsenter [][]byte
+	for _, rawTLSCA := range conf.Consenter.TLSCACerts {
+		tlsCAsOfConsenter = append(tlsCAsOfConsenter, rawTLSCA)
+	}
+
 	cs := &configSubmitter{
-		consensusEndpoint:     consensusEndpoint,
-		consensusRootCAs:      consensusRootCAs,
-		tlsCert:               tlsCert,
-		tlsKey:                tlsKey,
+		consensusEndpoint:     conf.Consenter.Endpoint,
+		consensusRootCAs:      tlsCAsOfConsenter,
+		tlsCert:               conf.TLSCertificateFile,
+		tlsKey:                conf.TLSPrivateKeyFile,
 		logger:                logger,
 		configRequestsChannel: make(chan *TrackedRequest, 100),
-		bundle:                bundle,
+		bundle:                conf.Bundle,
 		verifier:              verifier,
 		signer:                signer,
 		configUpdateProposer:  configUpdateProposer,

@@ -61,10 +61,10 @@ func NewRouterMetrics(routerNodeConfig *config.RouterNodeConfig, logger *floggin
 	if err != nil {
 		logger.Panicf("failed to convert port to int: %v", err)
 	}
-
-	monitor := monitoring.NewMonitor(monitoring.Endpoint{Host: host, Port: portInt}, "router")
-	p := monitor.Provider
 	partyID := fmt.Sprintf("%d", routerNodeConfig.PartyID)
+
+	monitor := monitoring.NewMonitor(monitoring.Endpoint{Host: host, Port: portInt}, fmt.Sprintf("router_%s", partyID))
+	p := monitor.Provider
 
 	rejectedTxs := p.NewCounter(rejectedTxs)
 
@@ -85,10 +85,10 @@ func (m *RouterMetrics) Stop() {
 		close(m.stopChan)
 		m.logger.Infof("Reporting routine is stopping")
 		m.monitor.Stop()
-		txCount := monitoring.GetMetricValue(m.incomingTxs.(prometheus.Metric), m.logger)
-		txRejected400 := monitoring.GetMetricValue(m.rejectedTxsWithCode400.(prometheus.Metric), m.logger)
-		txRejected500 := monitoring.GetMetricValue(m.rejectedTxsWithCode500.(prometheus.Metric), m.logger)
-		m.logger.Infof("ROUTER_METRICS: party_id=%d, transactions_received=%d, transactions_rejected_with_code_400=%d, transactions_rejected_with_code_500=%d", m.partyID, int(txCount), int(txRejected400), int(txRejected500))
+		// txCount := monitoring.GetMetricValue(m.incomingTxs.(prometheus.Metric), m.logger)
+		// txRejected400 := monitoring.GetMetricValue(m.rejectedTxsWithCode400.(prometheus.Metric), m.logger)
+		// txRejected500 := monitoring.GetMetricValue(m.rejectedTxsWithCode500.(prometheus.Metric), m.logger)
+		// m.logger.Infof("ROUTER_METRICS: party_id=%d, transactions_received=%d, transactions_rejected_with_code_400=%d, transactions_rejected_with_code_500=%d", m.partyID, int(txCount), int(txRejected400), int(txRejected500))
 	})
 }
 
