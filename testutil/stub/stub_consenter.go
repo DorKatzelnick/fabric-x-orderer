@@ -69,7 +69,9 @@ func NewStubConsenter(t *testing.T, ca tlsgen.CA, partyID types.PartyID) StubCon
 }
 
 func NewStubConsenterFromConfig(t *testing.T, configStoreDir string, nodeConfigPath string, listener net.Listener) *StubConsenter {
-	listener.Close()
+	if listener != nil {
+		listener.Close()
+	}
 
 	localConfig, _, err := config.LoadLocalConfig(nodeConfigPath)
 	require.NoError(t, err)
@@ -127,6 +129,7 @@ func (sc *StubConsenter) Start() {
 	protos.RegisterConsensusServer(sc.server.Server(), sc)
 	orderer.RegisterAtomicBroadcastServer(sc.server.Server(), sc)
 	go func() {
+		fmt.Printf("Starting StubConsenter %d at %s\n", sc.partyID, sc.server.Address())
 		if err := sc.server.Start(); err != nil {
 			panic(err)
 		}

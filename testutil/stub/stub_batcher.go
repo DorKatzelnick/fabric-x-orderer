@@ -41,6 +41,18 @@ type StubBatcher struct {
 	dropRequests bool
 }
 
+func NewStubBatcherWithCertKeySrv(t *testing.T, partyID types.PartyID, shardID types.ShardID, srv *comm.GRPCServer, TLSCert []byte, TLSKey []byte) *StubBatcher {
+	stubBatcher := &StubBatcher{
+		certificate: TLSCert,
+		key:         TLSKey,
+		server:      srv,
+		partyID:     partyID,
+		shardID:     shardID,
+		logger:      testutil.CreateLogger(t, int(shardID)),
+	}
+	return stubBatcher
+}
+
 func NewStubBatcher(t *testing.T, ca tlsgen.CA, partyID types.PartyID, shardID types.ShardID) StubBatcher {
 	// create a (cert,key) pair for the batcher
 	certKeyPair, err := ca.NewServerCertKeyPair("127.0.0.1")
@@ -69,8 +81,9 @@ func NewStubBatcher(t *testing.T, ca tlsgen.CA, partyID types.PartyID, shardID t
 }
 
 func NewStubBatcherFromConfig(t *testing.T, configStoreDir string, nodeConfigPath string, listener net.Listener) StubBatcher {
-	listener.Close()
-
+	if listener != nil {
+		listener.Close()
+	}
 	localConfig, _, err := config.LoadLocalConfig(nodeConfigPath)
 	require.NoError(t, err)
 

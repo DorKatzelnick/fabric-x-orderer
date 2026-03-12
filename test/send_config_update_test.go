@@ -663,7 +663,7 @@ func TestRemoveParty2(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	configPath := filepath.Join(dir, "config.yaml")
-	numOfParties := 2
+	numOfParties := 4
 	numOfShards := 2
 	submittingParty := types.PartyID(1)
 
@@ -682,7 +682,7 @@ func TestRemoveParty2(t *testing.T) {
 	numOfArmaNodes := len(netInfo)
 	readyChan := make(chan string, numOfArmaNodes)
 	armaNetwork := testutil.RunArmaNodes(t, dir, armaBinaryPath, readyChan, netInfo)
-	_ = armaNetwork
+
 	testutil.WaitReady(t, readyChan, numOfArmaNodes, 10)
 
 	parties := make([]types.PartyID, 0, numOfParties)
@@ -740,7 +740,65 @@ func TestRemoveParty2(t *testing.T) {
 	// Wait for Arma nodes to stop
 	testutil.WaitSoftStopped(t, netInfo)
 
-	time.Sleep(1 * time.Minute)
+	// Stop Arma nodes
+	armaNetwork.StopAllButRouter()
+
+	// Verify that the party is removed by checking the router's shared config
+	var remainingParties []types.PartyID
+	for i := 1; i <= numOfParties; i++ {
+		if types.PartyID(i) == partyToRemove {
+			continue
+		}
+		remainingParties = append(remainingParties, types.PartyID(i))
+	}
+
+	numOfParties--
+	numOfArmaNodes = numOfParties * (3 + numOfShards)
+
+	routerNodeConfigPath := filepath.Join(dir, "config", fmt.Sprintf("party%d", submittingParty), "local_config_router.yaml")
+	routerNodeConfig, _, err := config.ReadConfig(routerNodeConfigPath, testutil.CreateLoggerForModule(t, "ReadConfigRouter", zap.DebugLevel))
+	require.NoError(t, err)
+	require.Equal(t, numOfParties, len(routerNodeConfig.SharedConfig.GetPartiesConfig()), "Party was not removed from the config")
+
+	for _, partyConfig := range routerNodeConfig.SharedConfig.GetPartiesConfig() {
+		require.NotEqual(t, partyToRemove, partyConfig.PartyID, "Removed party still exists in the config")
+	}
+
+	// Restart remaining Arma nodes
+	readyChan = make(chan string, numOfArmaNodes)
+
+	// Try to restart the remaining Arma nodes, removed party nodes will fail to start but the rest should start successfully
+	armaNetwork.RestartPartiesNoRouter(t, remainingParties, readyChan)
+	defer armaNetwork.Stop()
+
+	testutil.WaitReady(t, readyChan, numOfArmaNodes-numOfParties, 10) // not waiting for router nodes ?
+
+	// Send transactions to remaining parties to verify they are processed
+	time.Sleep(10 * time.Second) // wait for the network to stabilize after restart
+	uc.RouterEndpoints = append(uc.RouterEndpoints[:partyToRemove-1], uc.RouterEndpoints[partyToRemove:]...)
+
+	broadcastClient = client.NewBroadcastTxClient(uc, 10*time.Second)
+
+	for i := range totalTxNumber {
+		txContent := tx.PrepareTxWithTimestamp(i+totalTxNumber, 64, []byte("sessionNumber"))
+		env := tx.CreateSignedStructuredEnvelope(txContent, signer, certBytes, org)
+		err = broadcastClient.SendTx(env)
+		require.NoError(t, err)
+	}
+
+	broadcastClient.Stop()
+
+	statusUnknown = common.Status_UNKNOWN
+	// Pull blocks to verify all transactions are included
+	PullFromAssemblers(t, &BlockPullerOptions{
+		UserConfig:   uc,
+		Parties:      remainingParties,
+		Transactions: totalTxNumber*2 + 1, // including config update tx
+		Timeout:      60,
+		ErrString:    "cancelled pull from assembler: %d; pull ended: failed to receive a deliver response: rpc error: code = Canceled desc = grpc: the client connection is closing",
+		Status:       &statusUnknown,
+		Signer:       signutil.CreateTestSigner(t, "org1", dir),
+	})
 }
 
 // TestAddNewParty verifies that adding a party via a config update succeeds,

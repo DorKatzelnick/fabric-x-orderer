@@ -71,6 +71,7 @@ type Router struct {
 	feedbackWG       sync.WaitGroup
 	configSeq        uint32
 	wal              *wal.WriteAheadLogFile
+	status           RouterStatus
 }
 
 func NewRouter(config *nodeconfig.RouterNodeConfig, configuration *config.Configuration, logger *flogging.FabricLogger, signer identity.SignerSerializer, armaStopChan chan struct{}, configUpdateProposer policy.ConfigUpdateProposer, configRulesVerifier verify.OrdererRules) *Router {
@@ -80,17 +81,19 @@ func NewRouter(config *nodeconfig.RouterNodeConfig, configuration *config.Config
 		logger:       logger,
 		signer:       signer,
 		armaStopChan: armaStopChan,
+		status:       RouterStatus{},
 	}
 
 	r.initFromConfig(config, configuration, configUpdateProposer, configRulesVerifier)
-
-	r.init()
-	r.metrics.Start()
 
 	return r
 }
 
 func (r *Router) initFromConfig(rconfig *nodeconfig.RouterNodeConfig, configuration *config.Configuration, configUpdateProposer policy.ConfigUpdateProposer, configRulesVerifier verify.OrdererRules) {
+	newConfigSeq := uint32(rconfig.Bundle.ConfigtxValidator().Sequence())
+	r.logger.Infof("Initializing router with PartyID: %d from config with sequence: %d", rconfig.PartyID, newConfigSeq)
+	r.status.Set(RouterStateInitializing, newConfigSeq)
+
 	if rconfig.NumOfConnectionsForBatcher == 0 {
 		rconfig.NumOfConnectionsForBatcher = config.DefaultRouterParams.NumberOfConnectionsPerBatcher
 	}
@@ -101,6 +104,8 @@ func (r *Router) initFromConfig(rconfig *nodeconfig.RouterNodeConfig, configurat
 
 	r.configuration = configuration
 	r.routerNodeConfig = rconfig
+	r.configSeq = uint32(r.routerNodeConfig.Bundle.ConfigtxValidator().Sequence())
+
 	// shardIDs is an array of all shard ids
 	var shardIDs []types.ShardID
 	// batcherEndpoints are the endpoints of all batchers from the router's party by shard id
@@ -157,13 +162,19 @@ func (r *Router) initFromConfig(rconfig *nodeconfig.RouterNodeConfig, configurat
 	r.decisionPuller = CreateConsensusDecisionReplicator(rconfig, seekInfo, r.logger)
 
 	r.metrics = NewRouterMetrics(rconfig, r.logger)
-	r.configSeq = uint32(r.routerNodeConfig.Bundle.ConfigtxValidator().Sequence())
 
 	// initialize channels and once
 	r.stopChan = make(chan struct{})
 	r.drainChan = make(chan struct{})
 	r.stopOnce = sync.Once{}
 	r.drainOnce = sync.Once{}
+
+	r.init()
+
+	r.metrics.Start()
+
+	r.logger.Infof("Router with PartyID: %d has been initialized from config with sequence: %d", rconfig.PartyID, r.configSeq)
+
 }
 
 func NewRouterOld(config *nodeconfig.RouterNodeConfig, configuration *config.Configuration, logger *flogging.FabricLogger, signer identity.SignerSerializer, armaStopChan chan struct{}, configUpdateProposer policy.ConfigUpdateProposer, configRulesVerifier verify.OrdererRules) *Router {
@@ -261,6 +272,10 @@ func getNextDecisionNumber(configStore *configstore.Store, walInitState [][]byte
 	return lastConfigBlockDecisionNumber + 1
 }
 
+func (r *Router) GetStatus() (RouterState, uint32) {
+	return r.status.Get()
+}
+
 func (r *Router) StartRouterService() {
 	srv := node_utils.CreateGRPCRouter(r.routerNodeConfig)
 	r.net = srv
@@ -269,6 +284,7 @@ func (r *Router) StartRouterService() {
 	orderer.RegisterAtomicBroadcastServer(srv.Server(), r)
 
 	go func() {
+		r.logger.Infof("Starting router network service on %s", r.net.Address())
 		err := srv.Start()
 		if err != nil {
 			panic(err)
@@ -281,6 +297,10 @@ func (r *Router) StartRouterService() {
 	node_utils.StopSignalListen(r.stopChan, r, r.logger, r.Address())
 
 	go r.pullAndProcessDecisions()
+
+	if ok := r.status.StateCompareAndSwapAny(RouterStateRunning, RouterStateInitializing); !ok {
+		r.logger.Panic("Failed to update router state")
+	}
 }
 
 func (r *Router) MonitoringServiceAddress() string {
@@ -296,6 +316,10 @@ func (r *Router) Address() string {
 }
 
 func (r *Router) Stop() {
+	if ok := r.status.StateCompareAndSwapAny(RouterStateStopping, RouterStateRunning, RouterStateInitializing); !ok {
+		r.logger.Warnf("Stop called but router is already stopping or stopped")
+		return
+	}
 	r.logger.Infof("Stopping router listening on %s, PartyID: %d", r.net.Address(), r.routerNodeConfig.PartyID)
 
 	r.net.Stop()
@@ -314,11 +338,18 @@ func (r *Router) Stop() {
 	for _, sr := range r.shardRouters {
 		sr.Stop()
 	}
-
+	if ok := r.status.StateCompareAndSwapAny(RouterStateStopped, RouterStateStopping); !ok {
+		panic("Failed to update router state to stopped")
+	}
 	close(r.armaStopChan)
 }
 
 func (r *Router) SoftStop() error {
+	r.logger.Warnf("Soft stop")
+	if ok := r.status.StateCompareAndSwapAny(RouterStateStopping, RouterStateRunning, RouterStateInitializing); !ok {
+		r.logger.Warnf("Soft stop called but router is already stopping or stopped")
+		return fmt.Errorf("soft stop called but router is already stopping or stopped")
+	}
 	routerAddress := r.net.Address()
 	partyID := r.routerNodeConfig.PartyID
 
@@ -350,7 +381,9 @@ func (r *Router) SoftStop() error {
 	r.net.Stop() // this will close all client connections, so some (immediate) responses may not be sent.
 
 	r.logger.Warnf("Router on %s, PartyID: %d, has been stopped.", routerAddress, partyID)
-
+	if ok := r.status.StateCompareAndSwapAny(RouterStateStopped, RouterStateStopping); !ok {
+		panic("Failed to update router state to stopped")
+	}
 	return nil
 }
 
@@ -392,12 +425,13 @@ func (r *Router) extractNewConfig(configBlock *common.Block) (*nodeconfig.Router
 	return newConfiguaration.ExtractRouterConfig(configBlock), newConfiguaration, nil
 }
 
-func (r *Router) ApplyConfig(configBlock *common.Block) error {
+// ApplyConfig applies the new configuration extracted from the config block, and returns whether admin restart is required and error if exists.
+func (r *Router) ApplyConfig(configBlock *common.Block) (bool, error) {
 	// extract new router node config from the last config block and conifguration
 	newSharedConfig, err := extractNewSharedConfig(configBlock)
 	if err != nil {
-		r.logger.Errorf("Failed to extract new shared config from last config block: %v. Admin's action required. ", err)
-		return errors.Wrapf(err, "failed to extract new shared config from last config block")
+		r.logger.Errorf("Failed to extract new shared config from last config block: %v.", err)
+		return false, errors.Wrapf(err, "failed to extract new shared config from last config block")
 	}
 
 	newConfiguration := &config.Configuration{
@@ -408,39 +442,39 @@ func (r *Router) ApplyConfig(configBlock *common.Block) error {
 	// fisrt, check party is evicted in the new configuration.
 	evicted, err := config.IsPartyEvicted(r.routerNodeConfig.PartyID, newConfiguration)
 	if err != nil {
-		return errors.Wrapf(err, "failed to check if router's party was evicted in the new configuration")
+		return false, errors.Wrapf(err, "failed to check if router's party was evicted in the new configuration")
 	} else if evicted {
 		r.logger.Warnf("Router's party %d was evicted in the new configuration", r.routerNodeConfig.PartyID)
-		return fmt.Errorf("router's party %d was evicted in the new configuration", r.routerNodeConfig.PartyID)
+		return true, fmt.Errorf("router's party %d was evicted in the new configuration", r.routerNodeConfig.PartyID)
 	}
 
 	// extract the new router node config.
 	newRouterNodeConfig, _, err := r.extractNewConfig(configBlock)
 	if err != nil {
-		r.logger.Warnf("Failed to extract new config from last config block: %v. Admin's action required. ", err)
-		return errors.Wrapf(err, "failed to extract new router node config from config block")
+		r.logger.Warnf("Failed to extract new config from last config block: %v.", err)
+		return false, errors.Wrapf(err, "failed to extract new router node config from config block")
 	}
 
-	configSeq := newRouterNodeConfig.Bundle.ConfigtxValidator().Sequence()
-	r.logger.Infof("New config was extracted from last config block, new config sequence: %d, current config sequence: %d", configSeq, r.configSeq)
+	newConfigSeq := newRouterNodeConfig.Bundle.ConfigtxValidator().Sequence()
+	r.logger.Infof("New config was extracted from last config block, new config sequence: %d, current config sequence: %d", newConfigSeq, r.configSeq)
 
 	// check if there is a change that requires admin restart.
 	currPartyConfig, _ := config.FindParty(r.routerNodeConfig.PartyID, r.configuration)
 	newPartyConfig, _ := config.FindParty(r.routerNodeConfig.PartyID, newConfiguration)
 	requireRestart, err := config.IsNodeConfigChangeRestartRequired(currPartyConfig.RouterConfig, newPartyConfig.RouterConfig, r.logger)
 	if err != nil {
-		return errors.Wrapf(err, "failed to check if node config change requires restart")
+		return false, errors.Wrapf(err, "failed to check if node config change requires restart")
 	} else if requireRestart {
-		r.logger.Warnf("Router's node config change requires restart, will not dynamically restart")
-		return fmt.Errorf("router's node config change requires restart, will not dynamically restart")
+		r.logger.Warnf("Admin's action is required to restart the router with the new configuration.")
+		return true, fmt.Errorf("admin's action is required to restart the router with the new configuration.")
 	}
 
-	r.logger.Infof("Applying new config with sequence %d, router will be restarted dynamically", configSeq)
+	r.logger.Infof("Applying new config with sequence %d, router will be restarted dynamically", newConfigSeq)
 
-	newRouter := NewRouter(newRouterNodeConfig, newConfiguration, r.logger, r.signer, r.armaStopChan, &policy.DefaultConfigUpdateProposer{}, &verify.DefaultOrdererRules{})
-	newRouter.StartRouterService()
-	newRouter.logger.Infof("Router started with new config sequence %d, listening on %s, PartyID: %d", configSeq, newRouter.Address(), newRouter.routerNodeConfig.PartyID)
-	return nil
+	r.initFromConfig(newRouterNodeConfig, newConfiguration, &policy.DefaultConfigUpdateProposer{}, &verify.DefaultOrdererRules{})
+	r.StartRouterService()
+	r.logger.Infof("Router started with new config sequence %d, listening on %s, PartyID: %d", newConfigSeq, r.Address(), r.routerNodeConfig.PartyID)
+	return false, nil
 }
 
 func (r *Router) Broadcast(stream orderer.AtomicBroadcast_BroadcastServer) error {
@@ -768,25 +802,7 @@ func (r *Router) pullAndProcessDecisions() {
 			}
 			r.logger.Infof("Added config block %d to config store", blockNum)
 
-			// initiate router restart and apply new config
-			r.logger.Warnf("Soft stop")
-			go func() {
-				err := r.SoftStop()
-				if err != nil {
-					r.logger.Warnf("The router was not Soft-Stopped properly: %v.", err)
-					// r.logger.Warnf("Closing arma process..")
-					// close(r.armaStopChan)
-					return
-				}
-
-				err = r.ApplyConfig(block)
-				if err != nil {
-					r.logger.Warnf("Failed to apply last config: %v. Admin's action required. ", err)
-					// r.logger.Warnf("Closing arma process..")
-					// close(r.armaStopChan)
-					return
-				}
-			}()
+			go r.processNewConfigBlock(block)
 
 			// do not pull additional decisions, until the router is restarted.
 			r.logger.Infof("Stopping decisions pulling from consensus")
@@ -796,6 +812,29 @@ func (r *Router) pullAndProcessDecisions() {
 			r.logger.Infof("Stopping decisions pulling from consensus")
 			return
 		}
+	}
+}
+
+// processNewConfigBlock processes the new config block. First it will soft-stop the router. Then, we try to apply the new config block.
+// If the new config contains changes that require admin restart, it will log a warning and return.
+// Otherwise, the router will be restarted with the new config dynamically.
+func (r *Router) processNewConfigBlock(configBlock *common.Block) {
+	r.logger.Infof("Processing new config block number %d", configBlock.Header.Number)
+
+	err := r.SoftStop()
+	if err != nil {
+		r.logger.Warnf("The router was not Soft-Stopped properly: %v. Admin's action is required.", err)
+		return
+	}
+
+	restartRequired, err := r.ApplyConfig(configBlock)
+	if restartRequired {
+		r.logger.Warnf("Admin's action is required to apply new config: %v.", err)
+		if ok := r.status.StateCompareAndSwapAny(RouterPendingAdmin, RouterStateStopped); !ok {
+			r.logger.Errorf("Failed to update router state to pending admin")
+		}
+	} else if err != nil {
+		r.logger.Panicf("Failed to apply last config: %v.", err)
 	}
 }
 
