@@ -10,13 +10,16 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+	"time"
 
+	"github.com/hyperledger/fabric-lib-go/bccsp/factory"
 	"github.com/hyperledger/fabric-lib-go/common/flogging"
 	"github.com/hyperledger/fabric-protos-go-apiv2/common"
 	"github.com/hyperledger/fabric-protos-go-apiv2/orderer"
 	"github.com/hyperledger/fabric-x-common/protoutil"
 	common_utils "github.com/hyperledger/fabric-x-orderer/common/utils"
 	"github.com/hyperledger/fabric-x-orderer/config"
+	"github.com/hyperledger/fabric-x-orderer/node/comm"
 	node_config "github.com/hyperledger/fabric-x-orderer/node/config"
 	"github.com/hyperledger/fabric-x-orderer/node/consensus/state"
 	"github.com/hyperledger/fabric-x-orderer/node/delivery"
@@ -44,6 +47,7 @@ type Assembler struct {
 	lastConfigBlockNumber uint64
 	metrics               *Metrics
 	ds                    *AssemblerDeliverService
+	// synchronizer          SynchronizerWithStop
 }
 
 func (a *Assembler) Broadcast(server orderer.AtomicBroadcast_BroadcastServer) error {
@@ -143,7 +147,7 @@ func NewDefaultAssembler(
 		metrics:      NewMetrics(nodeConfig, ledger.Metrics(), logger),
 	}
 
-	assembler.initLedger(configBlock)
+	assembler.initLedger(configBlock, nodeConfig, &SynchronizerCreator{})
 
 	assembler.initFromConfig(net, nodeConfig, configuration, configBlock, prefetchIndexFactory, prefetcherFactory, batchBringerFactory, consensusBringerFactory)
 
@@ -210,11 +214,38 @@ func (a *Assembler) initFromConfig(
 	a.logger.Infof("Assembler initialized successfully with config sequence number: %d", configSequence)
 }
 
-func (a *Assembler) initLedger(configBlock *common.Block) {
+func (a *Assembler) initLedger(configBlock *common.Block, nodeConfig *node_config.AssemblerNodeConfig, synchronizerFactory SynchronizerFactory) {
+	ledgerHeight := a.ledger.LedgerReader().Height()
+	configBlockNumber := configBlock.GetHeader().GetNumber()
+	a.logger.Infof("Initializing assembler ledger, current height: %d, config block number: %d", ledgerHeight, configBlockNumber)
+
+	if configBlockNumber > ledgerHeight {
+		// genesis block is block number 0, so if config block number is higher than ledger height, it means the assembler needs to sync to the config block before starting.
+		a.logger.Warnf("Config block number %d is higher than current ledger height %d, assembler will need to sync to the config block", configBlockNumber, ledgerHeight)
+		a.logger.Infof("Creating assembler synchronizer to sync to config block number %d, current ledger height is %d", configBlockNumber, ledgerHeight)
+
+		synchronizer := synchronizerFactory.CreateSynchronizer(
+			a.logger,
+			uint64(nodeConfig.PartyId),
+			config.Cluster{SendBufferSize: 100, ClientCertificate: nodeConfig.TLSCertificateFile, ClientPrivateKey: nodeConfig.TLSPrivateKeyFile, ReplicationPolicy: ""},
+			&AssemblerSupportAdapter{assembler: a},
+			factory.GetDefault(),
+			&comm.PredicateDialer{Config: a.clientConfig()},
+			configBlockNumber+1)
+
+		err := synchronizer.Sync()
+		if err != nil {
+			a.logger.Panicf("error while syncing to config block %v", err)
+		}
+	}
+
+	ledgerHeight = a.ledger.LedgerReader().Height()
+
+	// update metrics with current ledger state
+	// todo - fix this. updating the metrics after starting eith blocks in ledger and then syncing is probably incorrect.
 	var transactionCount, blocksCount uint64
-	height := a.ledger.LedgerReader().Height()
-	if height > 0 {
-		block, err := a.ledger.LedgerReader().RetrieveBlockByNumber(height - 1)
+	if ledgerHeight > 0 {
+		block, err := a.ledger.LedgerReader().RetrieveBlockByNumber(ledgerHeight - 1)
 		if err != nil {
 			a.logger.Panicf("error while fetching last block from ledger %v", err)
 		}
@@ -223,30 +254,25 @@ func (a *Assembler) initLedger(configBlock *common.Block) {
 			a.logger.Panicf("error while fetching last block ordering info %v", err)
 		}
 
-		blocksCount = height
+		blocksCount = ledgerHeight
 	}
 	a.ledger.Metrics().TransactionCount.Add(float64(transactionCount))
 	a.ledger.Metrics().BlocksCount.Add(float64(blocksCount))
 
-	a.logger.Infof("Starting with ledger height: %d", a.ledger.LedgerReader().Height())
-
-	if a.ledger.LedgerReader().Height() == 0 {
-		// append config block only if it is the genesis block
-		blockNumber := configBlock.GetHeader().Number
-		if blockNumber == 0 {
-			configBlock.Metadata.Metadata[common.BlockMetadataIndex_ORDERER] = common_utils.GenesisBlockMetadataBytes()
-			ordInfo := &state.OrderingInformation{
-				CommonBlock: configBlock,
-				DecisionNum: 0,
-				BatchIndex:  0,
-				BatchCount:  1,
-			}
-			a.ledger.AppendConfig(ordInfo)
-			a.logger.Infof("Appended genesis block, header digest: %s", hex.EncodeToString(protoutil.BlockHeaderHash(configBlock.GetHeader())))
-		} else {
-			a.logger.Infof("Assembler started with non-genesis config block, block number: %d", blockNumber)
+	// append config block only if it is the genesis block
+	if configBlockNumber == 0 {
+		configBlock.Metadata.Metadata[common.BlockMetadataIndex_ORDERER] = common_utils.GenesisBlockMetadataBytes()
+		ordInfo := &state.OrderingInformation{
+			CommonBlock: configBlock,
+			DecisionNum: 0,
+			BatchIndex:  0,
+			BatchCount:  1,
 		}
+		a.ledger.AppendConfig(ordInfo)
+		a.logger.Infof("Appended genesis block, header digest: %s", hex.EncodeToString(protoutil.BlockHeaderHash(configBlock.GetHeader())))
 	}
+
+	a.logger.Infof("Starting with ledger height: %d", a.ledger.LedgerReader().Height())
 }
 
 func NewAssembler(nodeConfig *node_config.AssemblerNodeConfig, configuration *config.Configuration, configBlock *common.Block, mainExitChan chan struct{}, logger *flogging.FabricLogger) *Assembler {
@@ -382,4 +408,37 @@ func (a *Assembler) checkNewConfiguration(newConfiguration *config.Configuration
 	}
 
 	return false, nil
+}
+
+func (a *Assembler) clientConfig() comm.ClientConfig {
+	var tlsCAs [][]byte
+	assemblers := a.configuration.ExtractAssemblers()
+
+	for _, assemblerInfo := range assemblers {
+		for _, tlsCACert := range assemblerInfo.TLSCACerts {
+			tlsCAs = append(tlsCAs, tlsCACert)
+		}
+	}
+
+	cert := a.assemblerNodeConfig.TLSCertificateFile
+
+	tlsKey := a.assemblerNodeConfig.TLSPrivateKeyFile
+
+	cc := comm.ClientConfig{
+		AsyncConnect: true,
+		KaOpts: comm.KeepaliveOptions{
+			ClientInterval: time.Hour,
+			ClientTimeout:  time.Hour,
+		},
+		SecOpts: comm.SecureOptions{
+			Key:               tlsKey,
+			Certificate:       cert,
+			RequireClientCert: true,
+			UseTLS:            true,
+			ServerRootCAs:     tlsCAs,
+		},
+		DialTimeout: time.Second * 5,
+		BaOpts:      comm.DefaultBackoffOptions,
+	}
+	return cc
 }
