@@ -26,6 +26,8 @@ type PartyConfig struct {
 }
 
 type RouterNodeConfig struct {
+	// the path to the signing certificate (that contains the public key) of the router used to authenticate signatures it produces
+	SignCert string `yaml:"SignCert,omitempty"`
 	// the path to the certificate used to authenticate with clients
 	TLSCert string `yaml:"TLSCert,omitempty"`
 	// the hostname or IP on which the gRPC server will listen
@@ -59,6 +61,8 @@ type ConsenterNodeConfig struct {
 }
 
 type AssemblerNodeConfig struct {
+	// the path to the signing certificate (that contains the public key) of the assembler used to authenticate signatures it produces
+	SignCert string `yaml:"SignCert,omitempty"`
 	// the path to the certificate used to authenticate with clients
 	TLSCert string `yaml:"TLSCert,omitempty"`
 	// the hostname or IP on which the gRPC server will listen
